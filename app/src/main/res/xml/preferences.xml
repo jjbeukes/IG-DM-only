@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory app:title="@string/pref_category_chats">
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:key="blur_media"
+            app:summary="@string/pref_blur_media_summary"
+            app:title="@string/pref_blur_media_title" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_category_profiles">
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:key="hide_suggestions"
+            app:summary="@string/pref_hide_suggestions_summary"
+            app:title="@string/pref_hide_suggestions_title" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:key="allow_activity"
+            app:summary="@string/pref_allow_activity_summary"
+            app:title="@string/pref_allow_activity_title" />
+        <Preference
+            app:dependency="allow_activity"
+            app:key="open_activity"
+            app:summary="@string/pref_open_activity_summary"
+            app:title="@string/pref_open_activity_title" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_category_account">
+        <EditTextPreference
+            app:key="username"
+            app:title="@string/pref_username_title" />
+        <Preference
+            app:key="logout"
+            app:summary="@string/pref_logout_summary"
+            app:title="@string/pref_logout_title" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_category_about">
+        <Preference
+            app:key="about"
+            app:selectable="false"
+            app:title="@string/pref_about_title" />
+    </PreferenceCategory>
+</PreferenceScreen>

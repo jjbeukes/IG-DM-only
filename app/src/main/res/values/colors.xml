@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="launcher_background">#5B3FD6</color>
+    <!-- Behind the WebView while a page loads; matches Instagram's light background. -->
+    <color name="page_background">#FFFFFF</color>
+</resources>

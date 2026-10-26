@@ -1,0 +1,15 @@
+{
+  "name": "dmonly-script-tests",
+  "private": true,
+  "description": "Tests for app/src/main/assets/dmonly.js, run against jsdom.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "30.1.2"
+  }
+}

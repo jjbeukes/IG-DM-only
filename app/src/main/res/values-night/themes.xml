@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DmOnly" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#B9A8FF</item>
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+    </style>
+
+    <style name="Theme.DmOnly.Settings" parent="Theme.Material3.DayNight">
+        <item name="colorPrimary">#B9A8FF</item>
+    </style>
+</resources>

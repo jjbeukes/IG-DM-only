@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
@@ -18,6 +19,7 @@ import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -25,11 +27,14 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -45,11 +50,12 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
 
     private lateinit var prefs: Prefs
     private lateinit var webView: WebView
+    private lateinit var client: DmWebViewClient
     private lateinit var bottomNav: BottomNavigationView
     private lateinit var progress: LinearProgressIndicator
     private lateinit var offline: View
-    private lateinit var content: FrameLayout
     private lateinit var bridge: WebBridge
+    private lateinit var backCallback: OnBackPressedCallback
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -63,9 +69,13 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
     private var imeVisible = false
     private var currentRoute = UrlPolicy.Route.OTHER
 
+    /** After logging out, the history from the old session is dropped once the new page commits. */
+    private var clearHistoryOnNextPage = false
+
     /** Profile tab tapped before the username was known; open it once the script reports it. */
     private var profileRequested = false
     private val profileTimeout = Runnable { onProfileLookupFailed() }
+    private var usernameDialog: AlertDialog? = null
 
     private var lastBlockedToast = 0L
 
@@ -99,27 +109,34 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         bottomNav = findViewById(R.id.bottom_nav)
         progress = findViewById(R.id.progress)
         offline = findViewById(R.id.offline)
-        content = findViewById(R.id.content)
         findViewById<View>(R.id.offline_retry).setOnClickListener { retry() }
 
         applyWindowInsets()
         setUpBottomNav()
         setUpWebView()
 
-        val restored = savedInstanceState != null && webView.restoreState(savedInstanceState) != null
+        // After a renderer crash the saved state points at the page that crashed it. Restore it once;
+        // if it crashes again straight away, start from the inbox instead of looping.
+        val restore = savedInstanceState != null && !skipRestoreOnce
+        skipRestoreOnce = false
+        val restored = restore && webView.restoreState(savedInstanceState!!) != null
         if (!restored) webView.loadUrl(UrlPolicy.INBOX_URL)
         loadedSnapshot = prefs.pageAffectingSnapshot()
 
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+        backCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
-                if (!handleBack()) {
-                    // Nothing left inside the app: let the system do its default (leave).
+                val action = backAction()
+                if (action != null) {
+                    action()
+                } else {
+                    // Things changed since the callback was last updated: let the system handle it.
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
-                    isEnabled = true
                 }
+                updateBackCallback()
             }
-        })
+        }
+        onBackPressedDispatcher.addCallback(this, backCallback)
     }
 
     // ---------------------------------------------------------------------------- layout
@@ -153,16 +170,22 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
 
     /** @return whether the tab should show as selected. */
     private fun onTab(id: Int, reselected: Boolean): Boolean {
-        when (id) {
-            R.id.nav_messages -> open(UrlPolicy.INBOX_URL, spaPath = "/direct/inbox/", forceReload = reselected && currentRoute == UrlPolicy.Route.INBOX)
-            R.id.nav_search -> open(UrlPolicy.SEARCH_URL, spaPath = null, forceReload = reselected)
+        return when (id) {
+            R.id.nav_messages -> {
+                open(UrlPolicy.INBOX_URL, spaPath = "/direct/inbox/", forceReload = reselected && currentRoute == UrlPolicy.Route.INBOX)
+                true
+            }
+            R.id.nav_search -> {
+                open(UrlPolicy.SEARCH_URL, spaPath = null, forceReload = reselected)
+                true
+            }
             R.id.nav_profile -> openOwnProfile(reselected)
             R.id.nav_settings -> {
                 startActivity(Intent(this, SettingsActivity::class.java))
-                return false
+                false
             }
+            else -> false
         }
-        return true
     }
 
     private fun updateBottomNavVisibility() {
@@ -234,6 +257,7 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
             currentUrl = { currentUrl },
             onUsername = ::onUsernameKnown,
             onBlocked = ::showBlockedToast,
+            onStuck = { client.showStuck(webView) },
         )
         webView.addJavascriptInterface(bridge, BRIDGE_NAME)
 
@@ -244,13 +268,14 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
             WebViewCompat.addDocumentStartJavaScript(webView, script, setOf(UrlPolicy.ORIGIN))
         }
 
-        webView.webViewClient = DmWebViewClient(this, fallbackScript = if (documentStart) null else script)
+        client = DmWebViewClient(this, fallbackScript = if (documentStart) null else script)
+        webView.webViewClient = client
         webView.webChromeClient = DmChromeClient()
     }
 
     private fun open(url: String, spaPath: String?, forceReload: Boolean) {
         hideOffline()
-        if (forceReload || spaPath == null || !UrlPolicy.isAllowed(currentUrl, policyOptions) || UrlPolicy.isAuthPage(currentUrl)) {
+        if (forceReload || spaPath == null || !UrlPolicy.isBackTarget(currentUrl, policyOptions)) {
             webView.loadUrl(url)
             return
         }
@@ -261,23 +286,30 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         }
     }
 
-    private fun openOwnProfile(reselected: Boolean) {
-        val url = UrlPolicy.profileUrl(prefs.username)
+    /** @return whether the Profile tab should show as selected now. */
+    private fun openOwnProfile(reselected: Boolean): Boolean {
+        val username = prefs.username
+        val url = UrlPolicy.profileUrl(username)
         if (url != null) {
-            open(url, spaPath = "/${prefs.username}/", forceReload = reselected)
-            return
+            open(url, spaPath = "/$username/", forceReload = reselected)
+            return true
         }
-        // Not known yet: ask the page (Instagram's own tab bar, then its web API).
+        // Not known yet: ask the page (Instagram's own tab bar, then its web API). The tab is
+        // selected once the profile actually opens.
         profileRequested = true
         webView.evaluateJavascript("window.__dmoLookupUsername && window.__dmoLookupUsername()", null)
         main.removeCallbacks(profileTimeout)
         main.postDelayed(profileTimeout, PROFILE_LOOKUP_TIMEOUT_MS)
+        return false
     }
 
     private fun onUsernameKnown(username: String) {
-        if (!profileRequested) return
+        val dialogOpen = usernameDialog?.isShowing == true
+        if (!profileRequested && !dialogOpen) return
         profileRequested = false
         main.removeCallbacks(profileTimeout)
+        usernameDialog?.dismiss()
+        usernameDialog = null
         UrlPolicy.profileUrl(username)?.let { open(it, spaPath = "/$username/", forceReload = false) }
     }
 
@@ -298,20 +330,26 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
             setPadding(pad, pad / 2, pad, 0)
             addView(input, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        MaterialAlertDialogBuilder(this)
+        usernameDialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.username_dialog_title)
             .setMessage(R.string.username_dialog_message)
             .setView(container)
             .setPositiveButton(R.string.ok) { _, _ ->
-                prefs.username = input.text.toString()
-                UrlPolicy.profileUrl(prefs.username)?.let { webView.loadUrl(it) }
+                val url = UrlPolicy.profileUrl(input.text.toString())
+                if (url == null) {
+                    Toast.makeText(this, R.string.invalid_username, Toast.LENGTH_SHORT).show()
+                } else {
+                    prefs.username = input.text.toString()
+                    webView.loadUrl(url)
+                }
             }
             .setNegativeButton(R.string.cancel, null)
+            .setOnDismissListener { usernameDialog = null }
             .show()
     }
 
     private fun showBlockedToast() {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         if (now - lastBlockedToast < BLOCKED_TOAST_INTERVAL_MS) return
         lastBlockedToast = now
         Toast.makeText(this, R.string.blocked_toast, Toast.LENGTH_SHORT).show()
@@ -323,9 +361,10 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         val uri = Uri.parse(url)
         val scheme = uri.scheme?.lowercase()
         if (scheme !in setOf("http", "https", "mailto", "tel", "sms", "smsto", "geo")) return
-        // Never hand instagram.com to the system: App Links would open the real Instagram app.
-        val host = uri.host?.lowercase().orEmpty()
-        if (host == "instagram.com" || host.endsWith(".instagram.com")) return
+        // Never hand Instagram (or a malformed web URL a browser might "fix" into Instagram) to the
+        // system: App Links would open the real Instagram app.
+        val host = uri.host.orEmpty()
+        if ((scheme == "http" || scheme == "https") && (host.isBlank() || UrlPolicy.isInstagramFamilyHost(host))) return
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
         } catch (_: ActivityNotFoundException) {
@@ -333,12 +372,19 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         }
     }
 
-    override fun onAllowedPage(url: String) {
+    override fun onAllowedPage(url: String, failed: Boolean) {
         currentUrl = url
         currentRoute = UrlPolicy.route(url)
-        hideOffline()
+        // Chromium's error page for a failed load also "commits" under the failed URL; keep the
+        // Retry screen up for it.
+        if (!failed) hideOffline()
+        if (clearHistoryOnNextPage && !failed) {
+            clearHistoryOnNextPage = false
+            webView.post { webView.clearHistory() }
+        }
         updateBottomNavVisibility()
         syncSelectedTab(url)
+        updateBackCallback()
     }
 
     override fun onPageLoading(loading: Boolean) {
@@ -348,12 +394,23 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
     override fun onMainFrameError() {
         offline.visibility = View.VISIBLE
         progress.visibility = View.GONE
+        updateBackCallback()
     }
 
     override fun onRendererGone() {
         // The renderer died (out of memory, or a WebView update). This WebView can't be used again;
         // rebuild the activity, which destroys it and starts over with a fresh one.
+        val now = SystemClock.elapsedRealtime()
+        if (lastRendererDeath != 0L && now - lastRendererDeath < RENDERER_CRASH_WINDOW_MS) skipRestoreOnce = true
+        lastRendererDeath = now
         recreate()
+    }
+
+    override fun onStuck() {
+        currentRoute = UrlPolicy.Route.OTHER
+        hideOffline()
+        updateBottomNavVisibility()
+        updateBackCallback()
     }
 
     private fun retry() {
@@ -363,45 +420,53 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
     }
 
     private fun hideOffline() {
-        offline.visibility = View.GONE
+        if (offline.visibility != View.GONE) {
+            offline.visibility = View.GONE
+            if (::backCallback.isInitialized) updateBackCallback()
+        }
     }
 
     // ------------------------------------------------------------------------------ back
 
     /**
-     * @return false when there is nothing left inside the app to go back to.
+     * What Back should do here, or null to leave it to the system (which closes the app).
      *
-     * Back never steps blindly through WebView history: it skips refused pages and login pages,
-     * and the inbox is home (back from there leaves the app).
+     * Back never steps blindly through WebView history: it skips refused pages and (once logged in)
+     * login pages, and the inbox is home. Keeping the callback disabled whenever this is null lets
+     * Android 16+ show the predictive back-to-home animation.
      */
-    private fun handleBack(): Boolean {
-        if (customView != null) {
-            webView.webChromeClient?.onHideCustomView()
-            return true
-        }
-        if (offline.visibility == View.VISIBLE) return false
+    private fun backAction(): (() -> Unit)? {
+        if (customView != null) return { hideCustomView() }
 
-        val current = webView.url ?: return false
-        if (UrlPolicy.route(current) == UrlPolicy.Route.INBOX) return false
+        val current = webView.url ?: return null
+        if (UrlPolicy.route(current) == UrlPolicy.Route.INBOX) return null
 
+        // While logging in, Back may return to an earlier login step (e.g. from 2FA to the form).
+        val onAuthPage = UrlPolicy.isAuthPage(current)
         val history = webView.copyBackForwardList()
         var index = history.currentIndex - 1
-        while (index >= 0) {
-            val candidate = history.getItemAtIndex(index)?.url
-            if (UrlPolicy.isAllowed(candidate, policyOptions) && !UrlPolicy.isAuthPage(candidate)) break
+        while (index >= 0 && !UrlPolicy.isBackTarget(history.getItemAtIndex(index)?.url, policyOptions, allowAuth = onAuthPage)) {
             index--
         }
-        return when {
-            index >= 0 -> {
-                webView.goBackOrForward(index - history.currentIndex)
-                true
-            }
-            UrlPolicy.isAuthPage(current) -> false
-            else -> {
-                webView.loadUrl(UrlPolicy.INBOX_URL)
-                true
+        if (index >= 0) {
+            val steps = index - history.currentIndex
+            return {
+                hideOffline()
+                webView.goBackOrForward(steps)
             }
         }
+        // Nothing to go back to: leave from login pages and from the "keeps redirecting" page,
+        // otherwise go home to the inbox.
+        if (onAuthPage || !current.startsWith("http")) return null
+        return {
+            hideOffline()
+            webView.loadUrl(UrlPolicy.INBOX_URL)
+        }
+    }
+
+    private fun updateBackCallback() {
+        if (!::backCallback.isInitialized) return
+        backCallback.isEnabled = backAction() != null
     }
 
     // ---------------------------------------------------------------------------- lifecycle
@@ -411,13 +476,8 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         webView.onResume()
 
         if (prefs.pendingReset) {
-            // Settings logged out: forget the page, its history and its cache too.
             prefs.pendingReset = false
-            webView.clearHistory()
-            webView.clearCache(true)
-            bridge.refresh()
-            loadedSnapshot = prefs.pageAffectingSnapshot()
-            webView.loadUrl(UrlPolicy.INBOX_URL)
+            resetSession()
             return
         }
 
@@ -438,6 +498,27 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         }
     }
 
+    /**
+     * Log out: leave the Instagram page first (so it can't write anything back), then wipe cookies,
+     * site storage and cache, and only then load the inbox, which lands on the login page. History
+     * from the old session is cleared once the new page has committed.
+     */
+    private fun resetSession() {
+        bridge.refresh()
+        loadedSnapshot = prefs.pageAffectingSnapshot()
+        currentUrl = null
+        webView.stopLoading()
+        webView.loadUrl("about:blank")
+        WebStorage.getInstance().deleteAllData()
+        webView.clearCache(true)
+        clearHistoryOnNextPage = true
+        val cookies = CookieManager.getInstance()
+        cookies.removeAllCookies {
+            cookies.flush()
+            if (!isDestroyed) webView.loadUrl(UrlPolicy.INBOX_URL)
+        }
+    }
+
     override fun onPause() {
         webView.onPause()
         // Persist the session now rather than whenever the engine gets round to it.
@@ -452,13 +533,44 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
 
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
+        usernameDialog?.dismiss()
         pendingFiles?.onReceiveValue(null)
         pendingFiles = null
-        if (webView.parent != null) {
-            (webView.parent as? ViewGroup)?.removeView(webView)
-            webView.destroy()
-        }
+        (webView.parent as? ViewGroup)?.removeView(webView)
+        webView.destroy()
         super.onDestroy()
+    }
+
+    // ------------------------------------------------------------------------ full-screen video
+
+    private fun showCustomView(view: View, callback: WebChromeClient.CustomViewCallback) {
+        if (customView != null) {
+            callback.onCustomViewHidden()
+            return
+        }
+        customView = view
+        customViewCallback = callback
+        (window.decorView as ViewGroup).addView(
+            view,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+        updateBottomNavVisibility()
+        updateBackCallback()
+    }
+
+    private fun hideCustomView() {
+        val view = customView ?: return
+        (window.decorView as ViewGroup).removeView(view)
+        customView = null
+        WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+        customViewCallback?.onCustomViewHidden()
+        customViewCallback = null
+        updateBottomNavVisibility()
+        updateBackCallback()
     }
 
     // ------------------------------------------------------------------------ chrome client
@@ -522,25 +634,9 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         }
 
         /** Full-screen video (someone's own video, opened full screen). */
-        override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-            if (customView != null) {
-                callback.onCustomViewHidden()
-                return
-            }
-            customView = view
-            customViewCallback = callback
-            content.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            updateBottomNavVisibility()
-        }
+        override fun onShowCustomView(view: View, callback: CustomViewCallback) = showCustomView(view, callback)
 
-        override fun onHideCustomView() {
-            val view = customView ?: return
-            content.removeView(view)
-            customView = null
-            customViewCallback?.onCustomViewHidden()
-            customViewCallback = null
-            updateBottomNavVisibility()
-        }
+        override fun onHideCustomView() = hideCustomView()
     }
 
     /** Grant the page whatever the app now holds for this origin, and nothing else. */
@@ -573,9 +669,16 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
 
     private companion object {
         const val BRIDGE_NAME = "__dmoBridge"
-        const val PROFILE_LOOKUP_TIMEOUT_MS = 4_000L
+        const val PROFILE_LOOKUP_TIMEOUT_MS = 6_000L
         const val BLOCKED_TOAST_INTERVAL_MS = 3_000L
+        const val RENDERER_CRASH_WINDOW_MS = 60_000L
         val UNREAD_TITLE = Regex("""^\((\d+)\)""")
+
+        /** When the WebView renderer last died in this process, to notice a crash loop. */
+        var lastRendererDeath = 0L
+
+        /** Set after a repeated renderer crash: the next activity starts fresh instead of restoring. */
+        var skipRestoreOnce = false
 
         /**
          * The file picker, built by hand: FileChooserParams.createIntent squeezes the page's

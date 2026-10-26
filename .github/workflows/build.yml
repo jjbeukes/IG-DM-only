@@ -4,7 +4,6 @@ on:
   push:
     branches: ['**']
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -17,13 +16,17 @@ concurrency:
 jobs:
   build:
     name: Test and build APK
-    runs-on: ubuntu-latest
+    # Pinned: this image ships the Android SDK (platform 37) and JDK 17 preinstalled.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       VERSION_CODE: ${{ github.run_number }}
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Keep the write token out of .git/config, where Gradle and npm dependencies could read it.
+          persist-credentials: false
 
       - uses: actions/setup-java@v6
         with:
@@ -57,8 +60,15 @@ jobs:
       - name: Load signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
+            if [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+              echo "::error title=Signing secrets incomplete::RELEASE_KEYSTORE_BASE64 is set but RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS or RELEASE_KEY_PASSWORD is missing. With a PKCS12 keystore the key password is the same as the store password."
+              exit 1
+            fi
             echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
             echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
             echo "Signing with the release key."
@@ -88,7 +98,8 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: DM-Only-${{ env.VERSION_NAME }}
+          # Upload the APK itself rather than a zip, so it installs straight from a phone download.
+          archive: false
           path: dist/*.apk
           if-no-files-found: error
 

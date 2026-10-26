@@ -29,12 +29,11 @@
   var bridge = window.__dmoBridge || null;
   var INBOX = '/direct/inbox/';
 
-  var config = {};
+  // Defaults match the app's; they only apply if the bridge is somehow missing.
+  var config = { hideSuggestions: true };
   try {
-    config = JSON.parse(bridge ? String(bridge.config()) : '{}') || {};
-  } catch (e) {
-    config = {};
-  }
+    if (bridge) config = JSON.parse(String(bridge.config())) || config;
+  } catch (e) {}
 
   // ------------------------------------------------------------------------------------ policy
 
@@ -88,7 +87,7 @@
   // Only used if the bridge is missing, which should never happen. Deliberately strict.
   function fallbackDecide(abs) {
     var u = new URL(abs);
-    if (!/(^|\.)instagram\.com$/.test(u.hostname)) return 'allow';
+    if (!/^(www\.|m\.)?instagram\.com$/.test(u.hostname)) return 'external';
     var p = u.pathname;
     if (/^\/direct(\/|$)/.test(p) || /^\/explore\/search\/?$/.test(p)) return 'allow';
     if (/^\/(accounts|challenge|two_factor|auth_platform|consent|api|graphql|ajax)(\/|$)/.test(p)) {
@@ -109,14 +108,19 @@
     return 'profile';
   }
 
-  /** Path of an instagram.com link, or null for other hosts. */
+  var paths = Object.create(null);
+
+  /** Path of an instagram.com link, or null for other hosts. Memoised per href. */
   function igPath(anchor) {
+    var href = anchor.getAttribute('href') || '';
+    if (href in paths) return paths[href];
+    var path = null;
     try {
-      var u = new URL(anchor.getAttribute('href'), location.href);
-      return /^(www\.)?instagram\.com$/.test(u.hostname) ? u.pathname : null;
-    } catch (e) {
-      return null;
-    }
+      var u = new URL(href, location.href);
+      if (/^(www\.|m\.)?instagram\.com$/.test(u.hostname)) path = u.pathname;
+    } catch (e) {}
+    paths[href] = path;
+    return path;
   }
 
   var lastNotice = 0;
@@ -132,9 +136,14 @@
   // ------------------------------------------------------------------------------------ route
 
   var route = 'other';
+  var routeHref = null;
 
   function updateRoute() {
-    route = routeOf(location.href);
+    // The route only changes with the URL; don't ask the app again on every DOM change.
+    if (routeHref !== location.href) {
+      routeHref = location.href;
+      route = routeOf(routeHref);
+    }
     var root = document.documentElement;
     if (!root) return;
     if (root.getAttribute('data-dmo-route') !== route) root.setAttribute('data-dmo-route', route);
@@ -154,30 +163,60 @@
 
   var BOUNCE_KEY = '__dmoBounces';
 
-  /*
-   * A client-side navigation to a refused page was cancelled. Instagram's router may already have
-   * rendered the refused view under the old URL, so reload the current page to throw that away.
-   * From a login page (e.g. "Save your login info?" heading for the feed) go to the inbox instead.
-   * Guarded so a page that keeps trying cannot loop.
-   */
-  function bounce() {
-    noticeBlocked();
+  /** Records an event under [key] in sessionStorage; returns how many happened in the last [ms]. */
+  function countRecent(key, ms) {
     var now = Date.now();
     var times = [];
     try {
-      times = JSON.parse(sessionStorage.getItem(BOUNCE_KEY) || '[]').filter(function (t) {
-        return now - t < 10000;
+      times = JSON.parse(sessionStorage.getItem(key) || '[]').filter(function (t) {
+        return now - t < ms;
       });
     } catch (e) {}
     times.push(now);
     try {
-      sessionStorage.setItem(BOUNCE_KEY, JSON.stringify(times));
+      sessionStorage.setItem(key, JSON.stringify(times));
     } catch (e) {}
+    return times.length;
+  }
 
-    if (times.length > 4 || onAuthPage() || refused(location.href)) {
+  /** Blank the page and stop all media at once, so nothing refused stays on screen while it reloads. */
+  function leave() {
+    var root = document.documentElement;
+    if (root) root.setAttribute('data-dmo-leaving', '');
+    silence(document);
+  }
+
+  /*
+   * A client-side navigation to a refused page was cancelled. Instagram's router may already have
+   * rendered the refused view under the old URL, so blank the page and reload the current one to
+   * throw that away. From a login page (e.g. "Save your login info?" heading for the feed) go to the
+   * inbox instead. If it keeps happening, stop and let the app show its "keeps redirecting" page
+   * rather than reloading for ever.
+   */
+  function bounce(quiet) {
+    if (!quiet) noticeBlocked();
+    if (countRecent(BOUNCE_KEY, 10000) > 4) {
+      try {
+        sessionStorage.removeItem(BOUNCE_KEY);
+        if (bridge && bridge.stuck) bridge.stuck();
+      } catch (e) {}
+      return;
+    }
+    leave();
+    if (onAuthPage() || refused(location.href)) {
       location.replace(INBOX);
     } else {
       location.replace(location.href);
+    }
+  }
+
+  /** Search's own Cancel button heads for /explore/ (the grid). That's expected, not worth a toast. */
+  function quietRefusal(url) {
+    if (route !== 'search') return false;
+    try {
+      return new URL(String(url), location.href).pathname.replace(/\/+$/, '') === '/explore';
+    } catch (e) {
+      return false;
     }
   }
 
@@ -185,6 +224,9 @@
   function onClick(e) {
     var t = e.target;
     if (!t || !t.closest) return;
+
+    // The script's own click on a reel viewer's close button.
+    if (selfClick) return;
 
     // Posts, reels and stories shared into a chat.
     if (t.closest('[data-dmo-shared], [data-dmo-viewer]')) {
@@ -227,7 +269,7 @@
         if (!e.destination || !e.destination.sameDocument || !e.cancelable) return;
         if (!refused(e.destination.url)) return;
         e.preventDefault();
-        bounce();
+        bounce(quietRefusal(e.destination.url));
       } catch (err) {}
     });
   }
@@ -238,7 +280,7 @@
     if (typeof original !== 'function') return;
     history[name] = function (state, title, url) {
       if (url != null && refused(url)) {
-        bounce();
+        bounce(quietRefusal(url));
         return undefined;
       }
       var result = original.apply(this, arguments);
@@ -251,9 +293,26 @@
     schedule();
   });
 
+  // Enter in the search box opens keyword results, which are a grid of posts. Account results appear
+  // as you type, so Enter does nothing here instead of reloading the page and losing the query.
+  window.addEventListener(
+    'keydown',
+    function (e) {
+      if (route !== 'search' || e.key !== 'Enter') return;
+      if (e.target && e.target.tagName === 'INPUT') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    },
+    true
+  );
+
   // ---------------------------------------------------------------------------------- styles
 
   var CSS = [
+    // Set just before leaving a page whose view was refused.
+    'html[data-dmo-leaving] body { visibility: hidden !important; }',
+
     // Doors to feeds, reels, explore, notifications, create, Threads, Meta AI and "get the app".
     // Prefixes end in "/" so a username that merely starts with "reels" is not caught.
     'a[href="/"], a[href="https://www.instagram.com/"], a[href^="/?"],',
@@ -404,11 +463,16 @@
     }
   }
 
+  var hiddenBar = null;
+
   function hideTabBar() {
+    // Runs every frame while the page changes, so skip the search once the bar is dealt with.
+    if (hiddenBar && hiddenBar.isConnected && reportedUsername) return;
     var bar = findTabBar();
     if (!bar) return;
-    captureUsername(bar);
+    if (!reportedUsername) captureUsername(bar);
     hide(bar);
+    hiddenBar = bar;
   }
 
   // ------------------------------------------------------------------------- refused links
@@ -425,12 +489,19 @@
       var href = a.getAttribute('href') || '';
       if (a.getAttribute('data-dmo-seen') === href) continue;
       a.setAttribute('data-dmo-seen', href);
-      if (!refused(a.href)) continue;
+      if (!refused(a.href)) {
+        // React reuses nodes: a link that now goes somewhere allowed must come back.
+        if (a.getAttribute('data-dmo-hide') === 'link') a.removeAttribute('data-dmo-hide');
+        a.removeAttribute('data-dmo-inert');
+        continue;
+      }
+      // Shared posts in a chat are already covered by a placeholder; hiding the link would hide that.
+      if (a.closest('[data-dmo-shared]')) continue;
       var path = igPath(a) || '';
       if (/^\/stories\//.test(path) && !/^\/stories\/highlights\//.test(path)) {
         a.setAttribute('data-dmo-inert', '');
-      } else if (!holdsChat(a)) {
-        hide(a);
+      } else if (!holdsChat(a) && !a.hasAttribute('data-dmo-hide')) {
+        a.setAttribute('data-dmo-hide', 'link');
       }
     }
   }
@@ -477,13 +548,18 @@
     }
   }
 
-  /** The block a "Suggested for you" heading belongs to: a few profile links, nothing else. */
+  /**
+   * The block a "Suggested for you" heading belongs to: the heading and the few profile links after
+   * it. Climbing stops before any ancestor that also holds content *above* the heading (on a
+   * followers page that would be the followers list itself).
+   */
   function suggestionSection(heading) {
     var best = null;
     for (var el = heading.parentElement, depth = 0; el && depth < 8; el = el.parentElement, depth++) {
       if (el === document.body || el.tagName === 'MAIN' || el.tagName === 'HEADER') break;
       if (el.getAttribute('role') === 'main' || el.getAttribute('role') === 'dialog') break;
       if (holdsChat(el) || el.querySelector('header, a[href$="/followers/"], a[href$="/following/"]')) break;
+      if (hasLinkBefore(el, heading)) break;
       var links = el.querySelectorAll('a[href]').length;
       if (links > 60) break;
       if (links > 0) best = el;
@@ -491,11 +567,21 @@
     return best;
   }
 
+  /** True if [scope] holds a link that comes before [node] in the page (and doesn't contain it). */
+  function hasLinkBefore(scope, node) {
+    var first = scope.querySelector('a[href]'); // document order: the first link decides
+    if (!first || first.contains(node)) return false;
+    return !!(first.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
   // ------------------------------------------------------------------------------ DM inbox
 
+  // Only the tray's own prompts. Bare words like "Note" or "Not" would also match a chat called
+  // "Notes" or a message preview, and hide a conversation.
   var NOTE_TEXT = new RegExp(
-    '^(notes?|your note|leave a note|share a note|add a note|note\\.\\.\\.|deine notiz|notiz|notizen|' +
-      'tu nota|nota|notas|sua nota|la tua nota|votre note|ta note|notitie|jouw notitie|notunuz|not)$',
+    '^(your note|leave a note|share a note|add a note|share a thought|share a thought\\.\\.\\.|note\\.\\.\\.|' +
+      'deine notiz|notiz hinterlassen|tu nota|deja una nota|sua nota|deixe uma nota|la tua nota|' +
+      'lascia una nota|votre note|laisser une note|jouw notitie|notunuz)$',
     'i'
   );
   var BACK_LABEL = /^(back|go back|zurück|retour|atrás|volver|indietro|voltar|terug|wstecz|geri|назад)$/i;
@@ -519,7 +605,8 @@
     var best = null;
     for (var el = node.parentElement, depth = 0; el && depth < 12; el = el.parentElement, depth++) {
       if (el === document.body || el.tagName === 'MAIN' || el.getAttribute('role') === 'main') break;
-      if (el.querySelector('a[href^="/direct/t/"], input, textarea, [contenteditable="true"]')) break;
+      var chatish = 'a[href^="/direct/t/"], input, textarea, [contenteditable="true"]';
+      if (el.matches(chatish) || el.querySelector(chatish)) break;
       var r = rect(el);
       if (r.height > 230 || r.bottom > 600) break;
       var wide = r.width >= Math.min(viewport * 0.65, 260);
@@ -543,6 +630,8 @@
   // ------------------------------------------------------------------------- DM threads
 
   var SHARED_LABEL = /^(clip|clips|reel|reels|collage|story|post)$/i;
+  var SHARED_PATH = /^\/(p|reels?|tv|s)\/|^\/stories\/(highlights\/|[^/]+\/\d)|^\/[^/]+\/(p|reels?|tv)\//;
+  var PROFILE_PICTURE = /profile picture|profilbild|photo de profil|foto del perfil|foto do perfil|immagine del profilo|profielfoto/i;
 
   /** The message bubble around a photo/video: the outermost button not much taller than it. */
   function bubbleOf(media, mediaHeight) {
@@ -615,6 +704,7 @@
     for (var i = 0; i < media.length; i++) {
       var m = media[i];
       if (m.closest('[data-dmo-shared], [data-dmo-blur], [data-dmo-revealed], [data-dmo-hide]')) continue;
+      if (PROFILE_PICTURE.test(m.getAttribute('alt') || '')) continue; // e.g. a shared profile card
       var r = rect(m);
       if (r.height < 90 || r.width < 60) continue; // avatars, stickers, reactions
 
@@ -636,13 +726,15 @@
       }
     }
 
-    // Links to posts/reels/stories without visible media yet (still loading) still get covered.
+    // Links to posts/reels/stories without visible media yet (still loading) still get covered. A
+    // bare /stories/<user>/ link is just a story ring around an avatar (made inert elsewhere); only
+    // links to a specific story item count as a shared story.
     var links = document.querySelectorAll('a[href]');
     for (var j = 0; j < links.length; j++) {
       var a = links[j];
-      if (a.closest('[data-dmo-shared]')) continue;
+      if (a.closest('[data-dmo-shared]') || a.hasAttribute('data-dmo-inert')) continue;
       var p = igPath(a);
-      if (p === null || !/^\/(p|reels?|tv|stories|s)\/|^\/[^/]+\/(p|reels?|tv)\//.test(p)) continue;
+      if (p === null || !SHARED_PATH.test(p)) continue;
       var kindOfLink = /\/(reels?|clips)\//.test(p) ? 'reel' : /^\/(stories|s)\//.test(p) ? 'story' : 'post';
       markShared(boundedBubble(a.closest('[role="button"]'), a), kindOfLink);
     }
@@ -693,33 +785,45 @@
     return count;
   }
 
+  /** The nearest dialog or fixed-position layer around the viewer (not the app shell further out). */
   function overlayOf(el) {
-    var top = el;
     for (var n = el; n && n !== document.body; n = n.parentElement) {
-      if (n.getAttribute('role') === 'dialog' || getComputedStyle(n).position === 'fixed') top = n;
+      if (n.getAttribute('role') === 'dialog' || getComputedStyle(n).position === 'fixed') return n;
     }
-    return top;
+    return el;
   }
 
-  function findCloseButton(scope) {
-    var labelled = scope.querySelectorAll('[aria-label]');
+  /** The viewer's close control: outside the reel feed first, and "Close" before "Back". */
+  function findCloseButton(overlay, viewer) {
+    var labelled = overlay.querySelectorAll('[aria-label]');
+    var best = null;
+    var bestScore = -1;
     for (var i = 0; i < labelled.length; i++) {
-      if (!CLOSE_LABEL.test(labelOf(labelled[i]))) continue;
-      return labelled[i].closest('button, [role="button"], a') || labelled[i];
+      var label = labelOf(labelled[i]);
+      if (!CLOSE_LABEL.test(label)) continue;
+      var score = (viewer.contains(labelled[i]) ? 0 : 2) + (/back|zurück|retour|atrás|volver|indietro|voltar|terug|geri|назад/i.test(label) ? 0 : 1);
+      if (score > bestScore) {
+        bestScore = score;
+        best = labelled[i].closest('button, [role="button"], a') || labelled[i];
+      }
     }
-    return null;
+    return best;
   }
 
   var RELOAD_KEY = '__dmoViewerReloads';
+  var selfClick = false;
 
   function closeViewer(viewer) {
     var overlay = overlayOf(viewer);
     silence(overlay);
-    var close = findCloseButton(overlay);
+    var close = findCloseButton(overlay, viewer);
     if (close) {
+      // Let this one click through the script's own guard on the viewer.
+      selfClick = true;
       try {
         close.click();
       } catch (e) {}
+      selfClick = false;
     } else {
       try {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -727,15 +831,10 @@
     }
     setTimeout(function () {
       if (!viewer.isConnected) return;
-      var reloads = 0;
-      try {
-        reloads = +(sessionStorage.getItem(RELOAD_KEY) || 0);
-        sessionStorage.setItem(RELOAD_KEY, String(reloads + 1));
-        setTimeout(function () {
-          sessionStorage.removeItem(RELOAD_KEY);
-        }, 15000);
-      } catch (e) {}
-      location.replace(reloads < 3 ? location.href : INBOX);
+      // Still open: reload the chat. After a few of those in a short time, go to the inbox.
+      var reloads = countRecent(RELOAD_KEY, 15000);
+      leave();
+      location.replace(reloads <= 3 ? location.href : INBOX);
     }, 700);
   }
 
@@ -826,7 +925,8 @@
   function fullPass() {
     cheapPass();
     if (onAuthPage()) return;
-    var steps = [sweepLinks, hideProfileGrid, hideInboxBack, sweepChatMedia, shutReelViewers];
+    // Chat media first, so a shared post's own link is covered by its placeholder, not just hidden.
+    var steps = [sweepChatMedia, sweepLinks, hideProfileGrid, hideInboxBack, shutReelViewers];
     // The text scans walk every span on the page, so they run less often.
     if (Date.now() - lastTextScan > 600) {
       lastTextScan = Date.now();

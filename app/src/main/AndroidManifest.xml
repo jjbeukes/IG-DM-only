@@ -9,6 +9,8 @@
         which can come up while logging in.
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- WebView's audio input needs this too (granted at install), or recording finds no device. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
         android:name="android.hardware.camera"

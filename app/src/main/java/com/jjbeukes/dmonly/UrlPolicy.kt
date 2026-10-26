@@ -55,7 +55,13 @@ object UrlPolicy {
         val hideSuggestions: Boolean = true,
     )
 
-    private val INSTAGRAM_HOSTS = setOf("instagram.com", "www.instagram.com", "m.instagram.com")
+    /** Hosts judged by the Instagram path rules. instagr.am is Instagram's old short domain (301s to www). */
+    private val INSTAGRAM_HOSTS = setOf(
+        "instagram.com", "www.instagram.com", "m.instagram.com", "instagr.am", "www.instagr.am",
+    )
+
+    /** Instagram's ig.me short links (ig.me/m/<user> opens a chat). Loaded in-app so the redirect is judged. */
+    private val SHORT_LINK_HOSTS = setOf("ig.me", "www.ig.me")
 
     /** Password, 2FA, cookie-consent and Accounts Center flows; they must load in-app. */
     private val IN_APP_HOSTS = setOf(
@@ -117,6 +123,7 @@ object UrlPolicy {
 
     private val AUTH_ROOTS = setOf(
         "challenge", "two_factor", "auth_platform", "fxcal", "consent", "oauth", "403invalidnonce", "terms",
+        "privacy",
     )
 
     /** Instagram usernames: letters, digits, periods and underscores, at most 30 characters. */
@@ -136,6 +143,26 @@ object UrlPolicy {
     /** True if [url] may be shown in the WebView. */
     fun isAllowed(url: String?, options: Options = Options()): Boolean =
         url != null && decide(url, options) == Decision.Allow
+
+    /**
+     * True if Back may land on [url]: an allowed web page that isn't a login step. Excludes inert
+     * pages such as about:blank (the "keeps redirecting" page).
+     */
+    fun isBackTarget(url: String?, options: Options = Options(), allowAuth: Boolean = false): Boolean {
+        val scheme = url?.let { ParsedUrl.parse(it) }?.scheme ?: return false
+        if (scheme != "http" && scheme != "https") return false
+        return isAllowed(url, options) && (allowAuth || !isAuthPage(url))
+    }
+
+    /**
+     * Any Instagram-owned host. Such URLs must never be handed to another app: Android's App Links
+     * would open them in the real Instagram app.
+     */
+    fun isInstagramFamilyHost(host: String?): Boolean {
+        val h = host?.lowercase()?.trimEnd('.') ?: return false
+        return h in INSTAGRAM_HOSTS || h in SHORT_LINK_HOSTS || h == "instagram.com" ||
+            h.endsWith(".instagram.com") || h.endsWith(".instagr.am") || h.endsWith(".ig.me")
+    }
 
     /** Classifies an allowed URL. Blocked or foreign URLs come back as [Route.OTHER]. */
     fun route(url: String?): Route {
@@ -191,12 +218,15 @@ object UrlPolicy {
     private fun decideWeb(url: ParsedUrl, options: Options, depth: Int): Decision {
         val host = url.host
         return when {
+            // A web URL without a host is malformed; a browser would "fix" it into anything.
+            host.isEmpty() -> Decision.Drop
             host in INSTAGRAM_HOSTS -> decideInstagramPath(url.segments, options)
             host in IN_APP_HOSTS -> Decision.Allow
+            host in SHORT_LINK_HOSTS -> Decision.Allow
             host in LINK_SHIM_HOSTS -> unwrapLinkShim(url, options, depth)
             host in FACEBOOK_HOSTS -> if (FACEBOOK_LOGIN_PATH.matches(url.path)) Decision.Allow else Decision.External(url.raw)
             host in DROPPED_HOSTS -> Decision.Drop
-            host.endsWith(".instagram.com") -> Decision.Drop // help., about., i. etc. would hand over to the app
+            isInstagramFamilyHost(host) -> Decision.Drop // help., about., i. etc. would hand over to the app
             host.endsWith(".cdninstagram.com") || host.endsWith(".fbcdn.net") -> Decision.Drop
             host == "play.google.com" && ("com.instagram" in url.query || "com.facebook" in url.query) -> Decision.Drop
             else -> Decision.External(url.raw)
@@ -307,12 +337,16 @@ object UrlPolicy {
             private val SCHEME = Regex("^([A-Za-z][A-Za-z0-9+.-]*):")
 
             fun parse(input: String): ParsedUrl? {
-                val raw = input.trim()
+                // Browsers drop tabs and newlines anywhere in a URL; do the same so they can't hide a host.
+                val raw = input.trim().replace(Regex("[\\t\\r\\n]"), "")
                 val scheme = SCHEME.find(raw)?.groupValues?.get(1)?.lowercase() ?: return null
                 val rest = raw.substring(scheme.length + 1)
-                if (!rest.startsWith("//")) return ParsedUrl(raw, scheme, "", rest, "")
+                val web = scheme == "http" || scheme == "https"
+                if (!web && !rest.startsWith("//")) return ParsedUrl(raw, scheme, "", rest, "")
 
-                val afterSlashes = rest.substring(2)
+                // For web URLs browsers accept any number of slashes or backslashes before the host
+                // ("https:/x", "https:///x"), so skip them all rather than requiring exactly "//".
+                val afterSlashes = if (web) rest.trimStart('/', '\\') else rest.substring(2)
                 val authorityEnd = afterSlashes.indexOfAny(charArrayOf('/', '?', '#', '\\'))
                     .let { if (it < 0) afterSlashes.length else it }
                 val authority = afterSlashes.substring(0, authorityEnd)

@@ -23,8 +23,20 @@ val releaseSigning: Map<String, String?> = run {
         "keyPassword" to value("RELEASE_KEY_PASSWORD", "keyPassword"),
     )
 }
-val hasReleaseKey = releaseSigning.values.all { it != null } &&
-    file(releaseSigning.getValue("storeFile")!!).exists()
+val missingSigning = releaseSigning.filterValues { it == null }.keys
+val hasReleaseKey = missingSigning.isEmpty()
+
+// A half-configured key would otherwise fall back to the debug key without a word, producing an
+// APK that can't update the installed app. Fail loudly instead.
+if (missingSigning.isNotEmpty() && missingSigning.size < releaseSigning.size) {
+    throw GradleException("Release signing is only partly configured; missing: $missingSigning")
+}
+
+/** Relative paths are taken from the project root, where keystore.properties lives. */
+val releaseStoreFile: File? = releaseSigning["storeFile"]?.let { rootProject.file(it) }
+if (hasReleaseKey && releaseStoreFile?.exists() != true) {
+    throw GradleException("Release keystore not found: $releaseStoreFile")
+}
 
 android {
     namespace = "com.jjbeukes.dmonly"
@@ -42,7 +54,7 @@ android {
     signingConfigs {
         if (hasReleaseKey) {
             create("release") {
-                storeFile = file(releaseSigning.getValue("storeFile")!!)
+                storeFile = releaseStoreFile
                 storePassword = releaseSigning["storePassword"]
                 keyAlias = releaseSigning["keyAlias"]
                 keyPassword = releaseSigning["keyPassword"]

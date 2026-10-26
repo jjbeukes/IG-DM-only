@@ -2,8 +2,6 @@ package com.jjbeukes.dmonly
 
 import android.os.Bundle
 import android.text.InputType
-import android.webkit.CookieManager
-import android.webkit.WebStorage
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -85,11 +83,11 @@ class SettingsActivity : AppCompatActivity() {
                 .show()
         }
 
-        /** Forget the Instagram session entirely: cookies, site storage, and the stored username. */
+        /**
+         * Forget the Instagram session. The main screen does the wipe (cookies, site storage, cache)
+         * when it resumes, after leaving the Instagram page so nothing can write the session back.
+         */
         private fun logOut() {
-            val cookies = CookieManager.getInstance()
-            cookies.removeAllCookies { cookies.flush() }
-            WebStorage.getInstance().deleteAllData()
             prefs.username = null
             findPreference<EditTextPreference>(Prefs.KEY_USERNAME)?.text = null
             prefs.pendingReset = true

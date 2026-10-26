@@ -35,8 +35,8 @@
     <string name="pref_username_title">Profile username</string>
     <string name="pref_username_summary_empty">Detected automatically after you log in</string>
     <string name="pref_logout_title">Log out and clear data</string>
-    <string name="pref_logout_summary">Removes cookies, cache and saved settings from this app</string>
-    <string name="pref_logout_confirm">Log out of Instagram in DM Only and clear all app data?</string>
+    <string name="pref_logout_summary">Removes your Instagram login, cookies, cache and site data from this app</string>
+    <string name="pref_logout_confirm">Log out of Instagram in DM Only and clear its cookies, cache and site data?</string>
     <string name="pref_logout_done">Logged out</string>
     <string name="pref_category_about">About</string>
     <string name="pref_about_title">DM Only</string>

@@ -19,6 +19,7 @@ class WebBridge(
     private val currentUrl: () -> String?,
     private val onUsername: (String) -> Unit,
     private val onBlocked: () -> Unit,
+    private val onStuck: () -> Unit,
 ) {
     private val main = Handler(Looper.getMainLooper())
 
@@ -55,6 +56,14 @@ class WebBridge(
     @JavascriptInterface
     fun blocked() {
         main.post(onBlocked)
+    }
+
+    /** The script has bounced too often in a short time; stop and show the "keeps redirecting" page. */
+    @JavascriptInterface
+    fun stuck() {
+        main.post {
+            if (UrlPolicy.ParsedUrl.parse(currentUrl() ?: return@post)?.host?.endsWith("instagram.com") == true) onStuck()
+        }
     }
 
     /** The logged-in user's username, read from Instagram's own nav bar or API. */

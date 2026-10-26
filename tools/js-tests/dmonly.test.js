@@ -298,6 +298,106 @@ test('__dmoGo clicks Instagram\'s own link for in-app navigation', async () => {
   window.close();
 });
 
+test('a chat header with a story ring is not mistaken for a shared story', async () => {
+  const { window, document } = load(
+    '/direct/t/1/',
+    '<main><div role="button" id="hdr"><a id="ring" href="/stories/alice/"><img data-h="40" data-w="40"></a>' +
+      '<span>Alice</span><span>Active now</span></div><textarea></textarea></main>'
+  );
+  await settle(window);
+  assert.equal(document.getElementById('hdr').hasAttribute('data-dmo-shared'), false);
+  assert.ok(document.getElementById('ring').hasAttribute('data-dmo-inert'));
+  assert.equal(click(window, document.querySelector('#hdr span')), false);
+  window.close();
+});
+
+test('a story someone shared (link to a specific story item) is covered', async () => {
+  const { window, document } = load(
+    '/direct/t/1/',
+    '<main><div role="button" id="story" data-h="300"><a href="/stories/alice/3345678901234567890/">x</a></div>' +
+      '<textarea></textarea></main>'
+  );
+  await settle(window);
+  assert.equal(document.getElementById('story').getAttribute('data-dmo-label'), 'Shared story hidden');
+  window.close();
+});
+
+test('a shared profile card (avatar image) is left tappable', async () => {
+  const { window, document } = load(
+    '/direct/t/1/',
+    '<main><div role="button" id="card" data-h="200"><a href="/bob/"><img alt="bob\'s profile picture" data-h="120" data-w="120"></a>' +
+      '<span>bob</span></div><textarea></textarea></main>'
+  );
+  await settle(window);
+  assert.equal(document.getElementById('card').hasAttribute('data-dmo-shared'), false);
+  window.close();
+});
+
+test('suggestions on a followers page hide only the suggestions, not the list above', async () => {
+  const rows = Array.from({ length: 12 }, (_, i) => `<div><a href="/f${i}/">f${i}</a><a href="/f${i}/">x</a></div>`).join('');
+  const { window, document } = load(
+    '/natgeo/followers/',
+    `<main><div><input></div><div id="wrap"><div id="list">${rows}</div>` +
+      '<div id="sugg"><span>Suggested for you</span><a href="/s1/">s1</a><a href="/s2/">s2</a></div></div></main>',
+    { config: { hideSuggestions: true } }
+  );
+  await settle(window);
+  assert.equal(document.getElementById('wrap').hasAttribute('data-dmo-hide'), false);
+  assert.equal(document.getElementById('list').hasAttribute('data-dmo-hide'), false);
+  assert.ok(document.getElementById('sugg').hasAttribute('data-dmo-hide'));
+  window.close();
+});
+
+test('an inbox chat named "Notes" (or a "Not" preview) is not hidden as the notes tray', async () => {
+  const { window, document } = load(
+    '/direct/inbox/',
+    '<main><div id="row" role="button" data-h="72" data-w="360" data-top="100"><img><img>' +
+      '<span>Notes</span><span>Not</span></div></main>'
+  );
+  await settle(window);
+  assert.equal(document.getElementById('row').hasAttribute('data-dmo-hide'), false);
+  window.close();
+});
+
+test('after repeated refused navigations the script stops reloading and asks the app to step in', async () => {
+  const { window, calls } = load('/direct/inbox/', '<main></main>');
+  let stuck = 0;
+  window.__dmoBridge.stuck = () => {
+    stuck++;
+  };
+  for (let i = 0; i < 5; i++) window.history.pushState({}, '', '/');
+  assert.equal(stuck, 1);
+  assert.ok(calls.blocked >= 1);
+  window.close();
+});
+
+test('search: Enter in the search box is swallowed; Cancel to /explore/ makes no toast', async () => {
+  const { window, document, calls } = load('/explore/search/', '<main><input id="q" aria-label="Search input"></main>');
+  await settle(window, 50);
+  const enter = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+  document.getElementById('q').dispatchEvent(enter);
+  assert.equal(enter.defaultPrevented, true);
+  window.history.pushState({}, '', '/explore/');
+  assert.equal(window.location.pathname, '/explore/search/');
+  assert.equal(calls.blocked, 0);
+  window.close();
+});
+
+test('the reel viewer is closed with its own Close button, not the chat\'s Back button', async () => {
+  const { window, document } = load(
+    '/direct/t/1/',
+    '<main><div role="button" aria-label="Back" id="back"></div><textarea></textarea></main>' +
+      '<div role="dialog"><div role="button" aria-label="Close" id="close"></div>' +
+      '<div id="viewer" data-snap-type="y mandatory"><div data-snap-align="start"><video></video>' +
+      '<div role="button" aria-label="Back" id="inner"></div></div><div data-snap-align="start"><video></video></div></div></div>'
+  );
+  const clicked = [];
+  for (const id of ['back', 'close', 'inner']) document.getElementById(id).addEventListener('click', () => clicked.push(id));
+  await settle(window);
+  assert.deepEqual(clicked, ['close']);
+  window.close();
+});
+
 test('username lookup reports what the tab bar shows', async () => {
   const { window, calls } = load(
     '/direct/inbox/',

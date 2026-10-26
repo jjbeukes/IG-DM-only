@@ -222,6 +222,48 @@ class UrlPolicyTest {
     }
 
     @Test
+    fun instagramShortDomainsAreJudgedInAppNeverHandedOut() {
+        assertTrue(decide("https://instagr.am/p/C1a2b3/") is Decision.Block)
+        assertTrue(decide("https://www.instagr.am/reel/C1a2b3/") is Decision.Block)
+        assertEquals(Decision.Allow, decide("https://instagr.am/natgeo/"))
+        assertEquals(Decision.Allow, decide("https://ig.me/m/natgeo"))
+        assertTrue(decide("https://l.instagram.com/?u=https%3A%2F%2Finstagr.am%2Fp%2FC1a2b3%2F") is Decision.Block)
+        assertEquals(Decision.Drop, decide("https://help.instagram.com/123"))
+        for (host in listOf("instagram.com", "www.instagram.com", "help.instagram.com", "instagr.am", "ig.me", "www.ig.me")) {
+            assertTrue(host, UrlPolicy.isInstagramFamilyHost(host))
+        }
+        assertFalse(UrlPolicy.isInstagramFamilyHost("example.com"))
+        assertFalse(UrlPolicy.isInstagramFamilyHost("notinstagram.com"))
+    }
+
+    @Test
+    fun malformedWebUrlsAreNormalisedLikeABrowserWould() {
+        assertTrue(decide("https:///www.instagram.com/p/X/") is Decision.Block)
+        assertTrue(decide("https:/www.instagram.com/reels/") is Decision.Block)
+        assertTrue(decide("https:\\\\www.instagram.com\\p\\X") is Decision.Block)
+        assertTrue(decide("https://www.insta\tgram.com/p/X/") is Decision.Block)
+        assertTrue(decide("https://l.instagram.com/?u=https%3A%2F%2F%2Fwww.instagram.com%2Fp%2FX%2F") is Decision.Block)
+        assertEquals(Decision.Drop, decide("https://"))
+        assertEquals(Decision.Drop, decide("https:///"))
+    }
+
+    @Test
+    fun backTargetsAreAllowedWebPagesOnly() {
+        assertTrue(UrlPolicy.isBackTarget("$ig/direct/t/1/"))
+        assertTrue(UrlPolicy.isBackTarget("$ig/natgeo/"))
+        assertFalse(UrlPolicy.isBackTarget("about:blank"))
+        assertFalse(UrlPolicy.isBackTarget("$ig/reels/"))
+        assertFalse(UrlPolicy.isBackTarget("$ig/accounts/login/"))
+        assertTrue(UrlPolicy.isBackTarget("$ig/accounts/login/", allowAuth = true))
+        assertFalse(UrlPolicy.isBackTarget(null))
+    }
+
+    @Test
+    fun cookieConsentCountsAsALoginStep() {
+        assertTrue(UrlPolicy.isAuthPage("$ig/privacy/checks/?cookie_consent=1&next=%2F"))
+    }
+
+    @Test
     fun inertSchemesAreAllowed() {
         assertEquals(Decision.Allow, decide("about:blank"))
         assertEquals(Decision.Allow, decide("blob:https://www.instagram.com/1234-5678"))

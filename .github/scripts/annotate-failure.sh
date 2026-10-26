@@ -5,7 +5,7 @@
 # Usage: annotate-failure.sh <log>...
 set -u
 
-escape() {
+escape_data() {
   local s="$1"
   s="${s//'%'/'%25'}"
   s="${s//$'\r'/}"
@@ -13,9 +13,17 @@ escape() {
   printf '%s' "$s"
 }
 
+escape_property() {
+  local s
+  s="$(escape_data "$1")"
+  s="${s//':'/'%3A'}"
+  s="${s//','/'%2C'}"
+  printf '%s' "$s"
+}
+
 annotate() { # title, body
   [ -n "$2" ] || return 0
-  echo "::error title=$1::$(escape "$2")"
+  echo "::error title=$(escape_property "$1")::$(escape_data "$2")"
 }
 
 for log in "$@"; do
@@ -26,12 +34,12 @@ for log in "$@"; do
 
   annotate "Kotlin compiler errors" "$(grep -E '^e: ' "$log" | head -n 30)"
 
-  annotate "Resource, manifest and lint errors" \
-    "$(grep -E 'AAPT|error: resource|Manifest merger|ERROR:|Lint found|Error: ' "$log" | grep -v '^e: ' | head -n 30)"
+  annotate "Resource / manifest / lint errors" \
+    "$(grep -E 'AAPT|error: resource|Manifest merger|^ERROR:|Lint found|\.xml:[0-9]+: Error: ' "$log" | head -n 30)"
 
-  annotate "Unit test failures" "$(grep -E -A 6 ' FAILED$' "$log" | head -n 60)"
+  # Test-case lines look like "UrlPolicyTest > blocksHome FAILED"; task lines ("> Task ... FAILED") don't count.
+  annotate "Unit test failures" "$(grep -E -A 6 '^[A-Za-z0-9_.$]+ > .+ FAILED$' "$log" | head -n 60)"
 
-  annotate "Script test failures" \
-    "$(grep -E -A 12 '^(not ok|✖)' "$log" | head -n 80)"
+  annotate "Script test failures" "$(grep -E -A 12 '^(not ok|✖)' "$log" | head -n 80)"
 done
 exit 0

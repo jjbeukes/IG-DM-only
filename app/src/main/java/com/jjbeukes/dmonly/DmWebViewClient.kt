@@ -28,14 +28,22 @@ class DmWebViewClient(
     interface Host {
         val policyOptions: UrlPolicy.Options
         fun openExternal(url: String)
-        fun onAllowedPage(url: String)
+
+        /** An allowed page committed. [failed] when it is Chromium's error page for a failed load. */
+        fun onAllowedPage(url: String, failed: Boolean)
         fun onPageLoading(loading: Boolean)
         fun onMainFrameError()
         fun onRendererGone()
+
+        /** Navigation is looping; the "keeps redirecting" page is showing instead. */
+        fun onStuck()
     }
 
     /** Times of recent forced redirects, to notice Instagram and the policy bouncing off each other. */
     private val recentRedirects = ArrayDeque<Long>()
+
+    /** Set when the main frame fails to load, until the next navigation starts. */
+    private var mainFrameFailed = false
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         // Subframes are embeds inside an allowed page (captchas, identity checks), not navigation.
@@ -53,7 +61,7 @@ class DmWebViewClient(
                 // login (or on a server redirect) the current page is a login page or nothing, so
                 // send them somewhere useful instead.
                 val current = view.url
-                if (request.isRedirect || !UrlPolicy.isAllowed(current, host.policyOptions) || UrlPolicy.isAuthPage(current)) {
+                if (request.isRedirect || !UrlPolicy.isBackTarget(current, host.policyOptions)) {
                     redirect(view, decision.redirect)
                 }
                 true
@@ -65,7 +73,7 @@ class DmWebViewClient(
         super.doUpdateVisitedHistory(view, url, isReload)
         if (url == null) return
         when (val decision = UrlPolicy.decide(url, host.policyOptions)) {
-            UrlPolicy.Decision.Allow -> if (url.startsWith("http")) host.onAllowedPage(url)
+            UrlPolicy.Decision.Allow -> if (url.startsWith("http")) host.onAllowedPage(url, failed = mainFrameFailed)
             is UrlPolicy.Decision.Block -> backOut(view, decision.redirect)
             is UrlPolicy.Decision.External -> {
                 host.openExternal(decision.url)
@@ -77,6 +85,7 @@ class DmWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        mainFrameFailed = false
         host.onPageLoading(true)
         fallbackScript?.let { view.evaluateJavascript(it, null) }
     }
@@ -96,13 +105,22 @@ class DmWebViewClient(
 
     override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
         super.onReceivedError(view, request, error)
-        if (request.isForMainFrame) host.onMainFrameError()
+        if (request.isForMainFrame) {
+            mainFrameFailed = true
+            host.onMainFrameError()
+        }
     }
 
     override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
         // The WebView is unusable now; the activity rebuilds itself with a fresh one.
         host.onRendererGone()
         return true
+    }
+
+    /** The injected script gave up bouncing: show the "keeps redirecting" page. */
+    fun showStuck(view: WebView) {
+        view.loadDataWithBaseURL(null, STUCK_PAGE, "text/html", "utf-8", null)
+        host.onStuck()
     }
 
     /**
@@ -112,12 +130,11 @@ class DmWebViewClient(
     private fun backOut(view: WebView, fallback: String) {
         val history = view.copyBackForwardList()
         var index = history.currentIndex - 1
-        while (index >= 0) {
-            val candidate = history.getItemAtIndex(index)?.url
-            if (UrlPolicy.isAllowed(candidate, host.policyOptions) && !UrlPolicy.isAuthPage(candidate)) break
+        while (index >= 0 && !UrlPolicy.isBackTarget(history.getItemAtIndex(index)?.url, host.policyOptions)) {
             index--
         }
         if (index >= 0 && !tooManyRedirects()) {
+            recentRedirects.addLast(SystemClock.elapsedRealtime())
             view.goBackOrForward(index - history.currentIndex)
         } else {
             redirect(view, fallback)
@@ -126,7 +143,7 @@ class DmWebViewClient(
 
     private fun redirect(view: WebView, url: String) {
         if (tooManyRedirects()) {
-            view.loadDataWithBaseURL(null, STUCK_PAGE, "text/html", "utf-8", null)
+            showStuck(view)
             return
         }
         recentRedirects.addLast(SystemClock.elapsedRealtime())
@@ -149,7 +166,9 @@ class DmWebViewClient(
             "<html><head><meta name=viewport content='width=device-width'></head>" +
                 "<body style='font-family:sans-serif;padding:24px;line-height:1.5'>" +
                 "<h3>Instagram keeps redirecting</h3>" +
-                "<p>Instagram keeps sending DM Only to a page it blocks. Tap Chats below to try again, " +
-                "or close the app and reopen it in a few minutes.</p></body></html>"
+                "<p>Instagram keeps sending DM Only to a page it blocks.</p>" +
+                "<p><a href='https://www.instagram.com/direct/inbox/'>Try your messages again</a></p>" +
+                "<p>If this keeps happening, close the app and reopen it in a few minutes, or log out " +
+                "under Settings and log in again.</p></body></html>"
     }
 }

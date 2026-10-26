@@ -25,3 +25,4 @@ desktop.ini
 # Node (script tests)
 node_modules/
 *.log
+.kotlin/

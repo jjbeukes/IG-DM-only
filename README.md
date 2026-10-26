@@ -19,7 +19,7 @@ Posts, reels and stories that people send you in a chat are replaced by a small 
 
 ## Install
 
-1. On your phone, open the [latest release](https://github.com/jjbeukes/IG-DM-only/releases/latest) and download `DM-Only-<version>.apk`. Builds of every commit are also kept under [Actions](https://github.com/jjbeukes/IG-DM-only/actions); those downloads need you to be signed in to GitHub.
+1. On your phone, open the [latest release](https://github.com/jjbeukes/IG-DM-only/releases/latest) and download `DM-Only-<version>.apk`. Recent builds of every commit are also available for a limited time under [Actions](https://github.com/jjbeukes/IG-DM-only/actions); those downloads need you to be signed in to GitHub.
 2. Open the APK. Android will ask you to allow installs from your browser or file manager the first time.
 3. Open **DM Only** and log in with your Instagram username and password.
 
@@ -84,12 +84,12 @@ To give every build the same key:
    ```
 
 2. In the repository, go to **Settings → Secrets and variables → Actions** and add these secrets:
-   - `RELEASE_KEYSTORE_BASE64`: the keystore, base64-encoded (`base64 -w0 release.jks`, or `[Convert]::ToBase64String([IO.File]::ReadAllBytes("release.jks"))` in PowerShell)
+   - `RELEASE_KEYSTORE_BASE64`: the keystore, base64-encoded (`base64 -w0 release.jks`, or `[Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path release.jks).Path)) | Set-Clipboard` in PowerShell, which copies it straight to the clipboard)
    - `RELEASE_STORE_PASSWORD`
    - `RELEASE_KEY_ALIAS` (`dmonly` above)
-   - `RELEASE_KEY_PASSWORD`
+   - `RELEASE_KEY_PASSWORD` (for the PKCS12 keystore above, the same as the store password)
 
-For local builds, put the same values in a gitignored `keystore.properties` with the keys `storeFile`, `storePassword`, `keyAlias` and `keyPassword`.
+For local builds, put the same values in a gitignored `keystore.properties` in the project root, with the keys `storeFile` (relative to the project root, or absolute), `storePassword`, `keyAlias` and `keyPassword`. A partly configured key fails the build rather than silently signing with a throwaway key.
 
 ## Disclaimer
 

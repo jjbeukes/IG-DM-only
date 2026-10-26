@@ -354,8 +354,9 @@
     '{ display: none !important; }',
 
     // Suggested accounts.
+    // (The container rule only on profiles: on a followers page it could catch the list itself.)
     'html[data-dmo-nosuggest] a[href^="/explore/people"],',
-    'html[data-dmo-nosuggest] div:has(> div > a[href^="/explore/people"])',
+    'html[data-dmo-nosuggest][data-dmo-route="profile"] div:has(> div > a[href^="/explore/people"])',
     '{ display: none !important; }',
 
     // Shared posts / reels / stories in a chat: collapsed to a labelled placeholder.

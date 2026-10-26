@@ -170,6 +170,8 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
 
     /** @return whether the tab should show as selected. */
     private fun onTab(id: Int, reselected: Boolean): Boolean {
+        // Going somewhere else cancels a Profile tap still waiting for the username.
+        if (id != R.id.nav_profile) cancelProfileLookup()
         return when (id) {
             R.id.nav_messages -> {
                 open(UrlPolicy.INBOX_URL, spaPath = "/direct/inbox/", forceReload = reselected && currentRoute == UrlPolicy.Route.INBOX)
@@ -311,6 +313,11 @@ class MainActivity : AppCompatActivity(), DmWebViewClient.Host {
         usernameDialog?.dismiss()
         usernameDialog = null
         UrlPolicy.profileUrl(username)?.let { open(it, spaPath = "/$username/", forceReload = false) }
+    }
+
+    private fun cancelProfileLookup() {
+        profileRequested = false
+        main.removeCallbacks(profileTimeout)
     }
 
     private fun onProfileLookupFailed() {
